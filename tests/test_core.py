@@ -54,11 +54,11 @@ class TestBinding:
 class TestIngest:
     async def test_ingest_returns_records_carrying_gateway_ids(self):
         core, _ = await build()
-        records = await core.ingest(TENANT, Episode(text="black coffee"), Scope(subject="u_1"))
-        assert len(records) == 1
-        assert records[0].id.startswith("mg_")
-        assert records[0].provider == "fake"
-        assert records[0].content == "black coffee"
+        written = await core.ingest(TENANT, Episode(text="black coffee"), Scope(subject="u_1"))
+        assert len(written.results) == 1
+        assert written.results[0].id.startswith("mg_")
+        assert written.provider == "fake"
+        assert written.results[0].content == "black coffee"
 
     async def test_ingest_is_refused_when_the_adapter_cannot_extract(self):
         core, _ = await build(caps=default_caps(supports_ingest=False))
@@ -135,27 +135,33 @@ class TestSearch:
 class TestGetUpdateDelete:
     async def test_get_returns_the_record(self):
         core, _ = await build()
-        [written] = await core.ingest(TENANT, Episode(text="black coffee"), Scope(subject="u_1"))
+        [written] = (
+            await core.ingest(TENANT, Episode(text="black coffee"), Scope(subject="u_1"))
+        ).results
         got = await core.get(TENANT, written.id)
         assert got.id == written.id
         assert got.content == "black coffee"
 
     async def test_another_tenants_id_is_a_404(self):
         core, _ = await build()
-        [written] = await core.ingest(TENANT, Episode(text="x"), Scope(subject="u_1"))
+        [written] = (await core.ingest(TENANT, Episode(text="x"), Scope(subject="u_1"))).results
         with pytest.raises(MemoryNotFound):
             await core.get("t2", written.id)
 
     async def test_update_rewrites_the_content(self):
         core, _ = await build()
-        [written] = await core.ingest(TENANT, Episode(text="black coffee"), Scope(subject="u_1"))
+        [written] = (
+            await core.ingest(TENANT, Episode(text="black coffee"), Scope(subject="u_1"))
+        ).results
         updated = await core.update(TENANT, written.id, "green tea")
         assert updated.content == "green tea"
         assert updated.id == written.id
 
     async def test_delete_removes_it_from_search_and_from_get(self):
         core, _ = await build()
-        [written] = await core.ingest(TENANT, Episode(text="black coffee"), Scope(subject="u_1"))
+        [written] = (
+            await core.ingest(TENANT, Episode(text="black coffee"), Scope(subject="u_1"))
+        ).results
         await core.delete(TENANT, written.id)
 
         with pytest.raises(MemoryNotFound):
@@ -175,11 +181,6 @@ class TestGetUpdateDelete:
 
 
 class TestReservedVerbs:
-    async def test_upsert_is_specified_but_not_built(self):
-        core, _ = await build()
-        with pytest.raises(NotImplementedYet):
-            await core.upsert(TENANT, ["a fact"], Scope(subject="u_1"))
-
     async def test_rebind_migrate_is_specified_but_not_built(self):
         core, _ = await build()
         with pytest.raises(NotImplementedYet):

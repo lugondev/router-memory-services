@@ -1,0 +1,41 @@
+# Backing services the live conformance runs need.
+#
+# Only the *live* runs. `pytest` with no environment variables set touches none of
+# this -- that separation is deliberate, so a contributor without credentials can
+# still run the whole offline suite.
+#
+#   docker compose -f docker-compose.test.yml up -d
+#   MEMGW_MEM0_TEST=1 MEM0_TELEMETRY=False OPENAI_API_KEY=sk-... .venv/bin/pytest
+#   MEMGW_PG_TEST=1 .venv/bin/pytest          # the native pgvector path
+#
+services:
+  qdrant:
+    # Mem0's own default is a local, file-backed Qdrant. That cannot be used here:
+    # it persists through SQLite while Mem0's AsyncMemory dispatches every call on a
+    # different thread-pool thread, and it takes an exclusive lock on its directory
+    # so a second client in the same process cannot open one at all. A server has
+    # neither problem.
+    image: qdrant/qdrant:latest
+    ports:
+      - "${MEMGW_QDRANT_PORT:-6333}:6333"
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c ':> /dev/tcp/127.0.0.1/6333' || exit 1"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+
+  postgres:
+    # pgvector's image: the native-vector tests need the extension, and stock
+    # postgres does not have it.
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: memgw
+      POSTGRES_PASSWORD: memgw
+      POSTGRES_DB: memgw
+    ports:
+      - "${MEMGW_PG_PORT:-55432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U memgw"]
+      interval: 2s
+      timeout: 2s
+      retries: 20

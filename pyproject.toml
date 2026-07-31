@@ -13,19 +13,40 @@ dependencies = [
   "sqlalchemy[asyncio]>=2.0",
   "aiosqlite>=0.20",
   "httpx>=0.27",
+  # The catalog schema has to be able to change after there is data in it, so
+  # migrations are not optional the way a provider is.
+  "alembic>=1.13",
 ]
+
+[project.scripts]
+memgw = "memgw.cli:main"
 
 [project.optional-dependencies]
 # The HTTP gateway. Embedded mode does not need it, so it is not a base dependency.
 server = ["fastapi>=0.115", "uvicorn[standard]>=0.30"]
 # Postgres + real pgvector. SQLite is the default and needs neither.
 postgres = ["asyncpg>=0.29", "pgvector>=0.3"]
-# Inert until installed; adapters.available() omits mem0 without it.
-mem0 = ["mem0ai>=0.1.0"]
-dev = ["pytest>=8.3", "pytest-asyncio>=0.23", "ruff>=0.6", "fastapi>=0.115"]
+# Inert until installed; adapters.available() omits these without them.
+mem0 = ["mem0ai>=0.1.0", "qdrant-client>=1.9"]
+zep = ["zep-cloud>=2.0"]
+# The built-in embedder and extractor, so the self-hosted adapter runs on a key
+# alone rather than on a class you have to write first.
+openai = ["openai>=1.40"]
+# Everything needed to serve every provider this build can configure from env.
+all = [
+  "fastapi>=0.115", "uvicorn[standard]>=0.30", "openai>=1.40",
+  "mem0ai>=0.1.0", "qdrant-client>=1.9", "zep-cloud>=2.0", "asyncpg>=0.29",
+]
+dev = ["pytest>=8.3", "pytest-asyncio>=0.23", "ruff>=0.6", "fastapi>=0.115", "openai>=1.40"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+# The migration scripts are data, not importable modules, and an sdist without
+# them ships a package that cannot build its own database.
+"memgw.migrations" = ["*.mako"]
+"memgw.migrations.versions" = ["*.py"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

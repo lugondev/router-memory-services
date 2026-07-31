@@ -17,12 +17,16 @@ SQLite by default; Postgres when ``DATABASE_URL`` says so.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import secrets
 import threading
 import time
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 from sqlalchemy import (
@@ -86,6 +90,25 @@ def _now() -> datetime:
 
 def _hash(content: str) -> str:
     return hashlib.sha256(content.encode("utf-8")).hexdigest()
+
+
+#: Marks a native id the gateway has seen and deleted, as distinct from one it has
+#: never seen. Reads drop it; a re-write revives it.
+_GONE = object()
+
+#: SQLite's default bind-parameter ceiling is 999 on builds still in the wild, and
+#: an ``IN`` list is one parameter per element. Chunking keeps a large scope from
+#: failing at exactly the moment it matters -- a bulk erasure.
+_CHUNK = 500
+
+#: Attempts at the map-or-insert transaction. One retry is enough: the second pass
+#: finds whatever the winner wrote, so a third could only mean a different fault.
+_RETRIES = 3
+
+
+def _chunks(values: list[str], size: int = _CHUNK):
+    for start in range(0, len(values), size):
+        yield values[start : start + size]
 
 
 # -- schema -------------------------------------------------------------------
@@ -152,6 +175,18 @@ class CatalogRow:
         return Scope(subject=self.subject, agent=self.agent, session=self.session)
 
 
+def _to_row(row: Any) -> CatalogRow:
+    return CatalogRow(
+        gateway_id=row["gateway_id"],
+        tenant_id=row["tenant_id"],
+        provider=row["provider"],
+        native_id=row["native_id"],
+        subject=row["subject"],
+        agent=row["agent"],
+        session=row["session"],
+    )
+
+
 @dataclass(frozen=True)
 class JournalRow:
     episode_id: str
@@ -160,6 +195,27 @@ class JournalRow:
     session: str | None
     payload: dict[str, Any]
     ingested_to: dict[str, list[str]]
+
+
+@dataclass(frozen=True)
+class SchemaState:
+    """Where the database is, versus where the code expects it to be."""
+
+    current: str | None
+    head: str | None
+
+    @property
+    def up_to_date(self) -> bool:
+        return self.current == self.head
+
+    def describe(self) -> str:
+        if self.up_to_date:
+            return f"at head ({self.head})"
+        return (
+            f"database is at {self.current or 'no revision'}, code expects {self.head}. "
+            "Run `memgw migrate` -- until then any query may reference a column that "
+            "is not there."
+        )
 
 
 @dataclass(frozen=True)
@@ -175,21 +231,120 @@ class RebindResult:
 class Catalog:
     def __init__(self, url: str = "sqlite+aiosqlite:///memgw.db") -> None:
         kwargs: dict[str, Any] = {}
-        if url.endswith(":memory:"):
+        shared_connection = url.endswith(":memory:")
+        if shared_connection:
             # Without a shared pool every connection gets its own empty database.
             kwargs = {"poolclass": StaticPool, "connect_args": {"check_same_thread": False}}
         self._engine: AsyncEngine = create_async_engine(url, **kwargs)
+
+        #: StaticPool hands *the same* DBAPI connection to every caller, so two
+        #: "concurrent transactions" are one transaction wearing two hats: a rollback
+        #: in either undoes the other's committed work. Serialising is what makes that
+        #: pool safe. A real pool gives out distinct connections and needs no gate --
+        #: there, concurrency is settled by the unique constraint and a retry.
+        self._gate: asyncio.Lock | None = asyncio.Lock() if shared_connection else None
 
     @property
     def engine(self) -> AsyncEngine:
         return self._engine
 
     async def init(self) -> None:
-        async with self._engine.begin() as conn:
-            await conn.run_sync(metadata.create_all)
+        """Bring an empty database up, and leave an existing one alone.
+
+        A fresh database is created and stamped at head in one step -- replaying
+        every migration to build tables that never existed is slower and no more
+        correct. A database that already has tables is *not* migrated here: applying
+        schema changes is a deploy decision with a rollback plan attached, not a side
+        effect of a process starting. :meth:`schema_state` reports the mismatch and
+        ``memgw migrate`` resolves it.
+        """
+        if await self._is_empty():
+            async with self._write() as conn:
+                await conn.run_sync(metadata.create_all)
+            await self._stamp("head")
+            return
+        if await self._revision() is None:
+            # Tables from before migrations existed. They match the first revision,
+            # so record that rather than making the operator guess.
+            await self._stamp("head")
+
+    async def upgrade(self) -> None:
+        """Run the migrations. What ``memgw migrate`` calls."""
+        async with self._write() as conn:
+            await conn.run_sync(self._alembic_upgrade)
+
+    async def schema_state(self) -> SchemaState:
+        head = self._head_revision()
+        return SchemaState(current=await self._revision(), head=head)
 
     async def close(self) -> None:
         await self._engine.dispose()
+
+    # -- migrations -----------------------------------------------------------
+
+    @staticmethod
+    def _alembic_config(connection: Any = None):
+        from alembic.config import Config
+
+        config = Config()
+        config.set_main_option("script_location", str(Path(__file__).parent / "migrations"))
+        if connection is not None:
+            config.attributes["connection"] = connection
+        return config
+
+    def _head_revision(self) -> str | None:
+        from alembic.script import ScriptDirectory
+
+        return ScriptDirectory.from_config(self._alembic_config()).get_current_head()
+
+    def _alembic_upgrade(self, connection) -> None:
+        from alembic import command
+
+        command.upgrade(self._alembic_config(connection), "head")
+
+    def _alembic_stamp(self, connection, revision: str) -> None:
+        from alembic import command
+
+        command.stamp(self._alembic_config(connection), revision)
+
+    async def _stamp(self, revision: str) -> None:
+        async with self._write() as conn:
+            await conn.run_sync(self._alembic_stamp, revision)
+
+    async def _revision(self) -> str | None:
+        from alembic.runtime.migration import MigrationContext
+
+        async with self._read() as conn:
+            return await conn.run_sync(
+                lambda sync: MigrationContext.configure(sync).get_current_revision()
+            )
+
+    async def _is_empty(self) -> bool:
+        from sqlalchemy import inspect
+
+        async with self._read() as conn:
+            names = await conn.run_sync(lambda sync: inspect(sync).get_table_names())
+        return not [n for n in names if n != "alembic_version"]
+
+    # -- connections ----------------------------------------------------------
+
+    @asynccontextmanager
+    async def _write(self) -> AsyncIterator[Any]:
+        if self._gate is None:
+            async with self._engine.begin() as conn:
+                yield conn
+            return
+        async with self._gate, self._engine.begin() as conn:
+            yield conn
+
+    @asynccontextmanager
+    async def _read(self) -> AsyncIterator[Any]:
+        if self._gate is None:
+            async with self._engine.connect() as conn:
+                yield conn
+            return
+        async with self._gate, self._engine.connect() as conn:
+            yield conn
 
     # -- memory_index ---------------------------------------------------------
 
@@ -203,106 +358,199 @@ class Catalog:
         than being dropped, which keeps a gateway pointed at a pre-existing provider
         store usable instead of half-blind.
         """
+        [row] = await self.record_many(tenant, provider, [(native_id, content)], scope)
+        return row.gateway_id
+
+    async def record_many(
+        self, tenant: str, provider: str, items: list[tuple[str, str]], scope: Scope
+    ) -> list[CatalogRow]:
+        """The write path: map a page of ids, reviving any the gateway had deleted.
+
+        A provider that deduplicates can answer a fresh write with a native id this
+        catalog buried earlier. That memory is genuinely back, so a write revives it --
+        whereas a *read* of the same id stays dropped (:meth:`ensure_many`), because a
+        read is just a provider that has not caught up with a delete yet.
+        """
+        return await self._map(tenant, provider, items, scope, revive=True)
+
+    async def ensure(
+        self, tenant: str, provider: str, native_id: str, scope: Scope, content: str
+    ) -> CatalogRow | None:
+        """Map one provider-native id to a gateway id. ``None`` when the gateway
+        considers it deleted -- see :meth:`ensure_many`."""
+        rows = await self.ensure_many(tenant, provider, [(native_id, content)], scope)
+        return rows[0] if rows else None
+
+    async def ensure_many(
+        self,
+        tenant: str,
+        provider: str,
+        items: list[tuple[str, str]],
+        scope: Scope,
+    ) -> list[CatalogRow]:
+        """Map a page of ``(native_id, content)`` hits in one round trip.
+
+        Three things this does that the obvious loop does not:
+
+        *Batched.* A search returning fifty hits used to cost fifty sequential
+        statements before the caller saw a single result.
+
+        *Leaves stored scope alone.* The scope a caller searched with is usually
+        broader than the scope each memory was written with -- recall across sessions
+        is the whole point -- so the query's scope is used only for rows being seen
+        for the first time, never written back over an existing one.
+
+        *Drops what the gateway deleted.* A provider that has not yet propagated a
+        delete keeps serving the memory; remapping it would hand back an id that
+        ``GET`` immediately answers with a 404. Deleted means gone from reads.
+        """
+        return await self._map(tenant, provider, items, scope, revive=False)
+
+    async def _map(
+        self,
+        tenant: str,
+        provider: str,
+        items: list[tuple[str, str]],
+        scope: Scope,
+        *,
+        revive: bool,
+    ) -> list[CatalogRow]:
+        """Look up, insert what is missing, and return the mapping -- atomically.
+
+        All of it happens in one transaction, because check-then-insert across two
+        connections is a race by construction. When a genuinely concurrent writer wins
+        the unique constraint, the transaction is rolled back and retried: on the
+        second pass the lookup simply finds the row the winner wrote. Losing that race
+        is ordinary, not exceptional, and must not reach the caller as a 500.
+        """
+        if not items:
+            return []
+
+        natives = [native for native, _ in items]
+        for attempt in range(_RETRIES):
+            try:
+                async with self._write() as conn:
+                    known = await self._find_by_native(conn, tenant, provider, natives)
+
+                    missing = [
+                        (native, content) for native, content in items if native not in known
+                    ]
+                    if missing:
+                        known.update(await self._insert(conn, tenant, provider, missing, scope))
+
+                    if revive:
+                        doomed = [n for n in natives if known.get(n, _GONE) is _GONE]
+                        if doomed:
+                            await self._revive(conn, tenant, provider, doomed, scope, dict(items))
+                            known.update(await self._find_by_native(conn, tenant, provider, doomed))
+
+                    return [
+                        row
+                        for native in natives
+                        if isinstance(row := known.get(native), CatalogRow)
+                    ]
+            except IntegrityError:
+                if attempt == _RETRIES - 1:
+                    raise
+        raise AssertionError("unreachable")
+
+    async def _insert(
+        self,
+        conn: Any,
+        tenant: str,
+        provider: str,
+        missing: list[tuple[str, str]],
+        scope: Scope,
+    ) -> dict[str, CatalogRow]:
         now = _now()
-        async with self._engine.begin() as conn:
-            found = (
-                await conn.execute(
-                    select(memory_index.c.gateway_id).where(
-                        memory_index.c.tenant_id == tenant,
-                        memory_index.c.provider == provider,
-                        memory_index.c.native_id == native_id,
-                    )
-                )
-            ).scalar_one_or_none()
+        values = [
+            {
+                "gateway_id": new_id(),
+                "tenant_id": tenant,
+                "provider": provider,
+                "native_id": native,
+                "subject": scope.subject,
+                "agent": scope.agent,
+                "session": scope.session,
+                "content_hash": _hash(content),
+                "created_at": now,
+                "updated_at": now,
+                "deleted_at": None,
+            }
+            for native, content in missing
+        ]
+        await conn.execute(insert(memory_index), values)
+        return {
+            row["native_id"]: CatalogRow(
+                gateway_id=row["gateway_id"],
+                tenant_id=tenant,
+                provider=provider,
+                native_id=row["native_id"],
+                subject=scope.subject,
+                agent=scope.agent,
+                session=scope.session,
+            )
+            for row in values
+        }
 
-            if found is not None:
-                await conn.execute(
-                    update(memory_index)
-                    .where(memory_index.c.gateway_id == found)
-                    .values(
-                        subject=scope.subject,
-                        agent=scope.agent,
-                        session=scope.session,
-                        content_hash=_hash(content),
-                        updated_at=now,
-                        deleted_at=None,
-                    )
-                )
-                return found
-
-            gateway_id = new_id()
+    async def _revive(
+        self,
+        conn: Any,
+        tenant: str,
+        provider: str,
+        natives: list[str],
+        scope: Scope,
+        contents: dict[str, str],
+    ) -> None:
+        """Re-writing the same native id is a write, and a write un-deletes."""
+        now = _now()
+        for native in natives:
             await conn.execute(
-                insert(memory_index).values(
-                    gateway_id=gateway_id,
-                    tenant_id=tenant,
-                    provider=provider,
-                    native_id=native_id,
+                update(memory_index)
+                .where(
+                    memory_index.c.tenant_id == tenant,
+                    memory_index.c.provider == provider,
+                    memory_index.c.native_id == native,
+                )
+                .values(
                     subject=scope.subject,
                     agent=scope.agent,
                     session=scope.session,
-                    content_hash=_hash(content),
-                    created_at=now,
+                    content_hash=_hash(contents.get(native, "")),
                     updated_at=now,
                     deleted_at=None,
                 )
             )
-            return gateway_id
 
-    async def ensure(
-        self, tenant: str, provider: str, native_id: str, scope: Scope, content: str
-    ) -> CatalogRow:
-        """Map a provider-native id to a gateway id *without disturbing what is stored*.
-
-        Search hits go through here rather than :meth:`record`. The scope a caller
-        searched with is often broader than the scope the memory was written with --
-        recall across sessions is the whole point -- so writing the query's scope back
-        over the stored one would quietly widen it and break the next session filter.
-        """
-        found = await self._find_by_native(tenant, provider, native_id)
-        if found is not None:
-            return found
-        gateway_id = await self.record(tenant, provider, native_id, scope, content)
-        return CatalogRow(
-            gateway_id=gateway_id,
-            tenant_id=tenant,
-            provider=provider,
-            native_id=native_id,
-            subject=scope.subject,
-            agent=scope.agent,
-            session=scope.session,
-        )
-
+    @staticmethod
     async def _find_by_native(
-        self, tenant: str, provider: str, native_id: str
-    ) -> CatalogRow | None:
-        async with self._engine.connect() as conn:
-            row = (
+        conn: Any, tenant: str, provider: str, natives: list[str]
+    ) -> dict[str, CatalogRow | object]:
+        """Live rows as :class:`CatalogRow`; soft-deleted ones as the ``_GONE`` marker,
+        so a caller can tell "never seen" from "deleted" without a second query."""
+        if not natives:
+            return {}
+        found: dict[str, CatalogRow | object] = {}
+        for chunk in _chunks(natives):
+            rows = (
                 (
                     await conn.execute(
                         select(memory_index).where(
                             memory_index.c.tenant_id == tenant,
                             memory_index.c.provider == provider,
-                            memory_index.c.native_id == native_id,
+                            memory_index.c.native_id.in_(chunk),
                         )
                     )
                 )
                 .mappings()
-                .one_or_none()
+                .all()
             )
-        if row is None:
-            return None
-        return CatalogRow(
-            gateway_id=row["gateway_id"],
-            tenant_id=row["tenant_id"],
-            provider=row["provider"],
-            native_id=row["native_id"],
-            subject=row["subject"],
-            agent=row["agent"],
-            session=row["session"],
-        )
+            for row in rows:
+                found[row["native_id"]] = _GONE if row["deleted_at"] is not None else _to_row(row)
+        return found
 
     async def resolve_gateway_id(self, tenant: str, gateway_id: str) -> CatalogRow | None:
-        async with self._engine.connect() as conn:
+        async with self._read() as conn:
             row = (
                 (
                     await conn.execute(
@@ -329,7 +577,7 @@ class Catalog:
         )
 
     async def mark_deleted(self, tenant: str, gateway_id: str) -> bool:
-        async with self._engine.begin() as conn:
+        async with self._write() as conn:
             result = await conn.execute(
                 update(memory_index)
                 .where(
@@ -352,14 +600,14 @@ class Catalog:
             conditions.append(memory_index.c.agent == scope.agent)
         if scope.session:
             conditions.append(memory_index.c.session == scope.session)
-        async with self._engine.begin() as conn:
+        async with self._write() as conn:
             result = await conn.execute(
                 update(memory_index).where(*conditions).values(deleted_at=_now())
             )
         return result.rowcount
 
     async def live_count(self, tenant: str, subject: str, provider: str) -> int:
-        async with self._engine.connect() as conn:
+        async with self._read() as conn:
             return (
                 await conn.execute(
                     select(func.count())
@@ -376,7 +624,7 @@ class Catalog:
     # -- scope_binding --------------------------------------------------------
 
     async def get_binding(self, tenant: str, subject: str) -> str | None:
-        async with self._engine.connect() as conn:
+        async with self._read() as conn:
             return (
                 await conn.execute(
                     select(scope_binding.c.provider).where(
@@ -390,7 +638,7 @@ class Catalog:
         """Bind on first write. Never moves an existing binding -- that is ``rebind``,
         and it is a deliberate act with consequences the caller must be told about."""
         try:
-            async with self._engine.begin() as conn:
+            async with self._write() as conn:
                 await conn.execute(
                     insert(scope_binding).values(
                         tenant_id=tenant, subject=subject, provider=provider, bound_at=_now()
@@ -407,7 +655,7 @@ class Catalog:
         if previous is not None and previous != provider:
             orphaned = await self.live_count(tenant, subject, previous)
 
-        async with self._engine.begin() as conn:
+        async with self._write() as conn:
             await conn.execute(
                 delete(scope_binding).where(
                     scope_binding.c.tenant_id == tenant, scope_binding.c.subject == subject
@@ -438,7 +686,7 @@ class Catalog:
         ingested_to: dict[str, list[str]],
     ) -> str:
         episode_id = new_id("ep")
-        async with self._engine.begin() as conn:
+        async with self._write() as conn:
             await conn.execute(
                 insert(episode_journal).values(
                     episode_id=episode_id,
@@ -453,8 +701,28 @@ class Catalog:
             )
         return episode_id
 
+    async def delete_journal(self, tenant: str, scope: Scope) -> int:
+        """Erasure has to reach in here too.
+
+        ``memory_index`` holds hashes and ids; the journal holds the raw transcript --
+        the most sensitive thing the gateway ever stores, and the thing a subject
+        deletion is usually *about*. Soft-deleting the index while leaving the episodes
+        behind would make ``delete_scope`` a promise the gateway does not keep.
+        """
+        conditions = [
+            episode_journal.c.tenant_id == tenant,
+            episode_journal.c.subject == scope.subject,
+        ]
+        if scope.agent:
+            conditions.append(episode_journal.c.agent == scope.agent)
+        if scope.session:
+            conditions.append(episode_journal.c.session == scope.session)
+        async with self._write() as conn:
+            result = await conn.execute(delete(episode_journal).where(*conditions))
+        return result.rowcount
+
     async def journal_rows(self, tenant: str, subject: str) -> list[JournalRow]:
-        async with self._engine.connect() as conn:
+        async with self._read() as conn:
             rows = (
                 (
                     await conn.execute(

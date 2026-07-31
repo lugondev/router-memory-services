@@ -9,6 +9,19 @@ class TestHealth:
         assert response.json() == {"status": "ok"}
 
 
+class TestRequestId:
+    async def test_every_response_carries_one(self, gateway):
+        client, _, _ = gateway
+        response = await client.get("/healthz")
+        assert response.headers["x-request-id"].startswith("req_")
+
+    async def test_a_callers_own_id_is_kept_rather_than_replaced(self, gateway):
+        # So a trace that starts upstream does not break at the gateway boundary.
+        client, _, _ = gateway
+        response = await client.get("/healthz", headers={"x-request-id": "trace-abc"})
+        assert response.headers["x-request-id"] == "trace-abc"
+
+
 class TestProviders:
     async def test_it_reports_health_and_capabilities_per_provider(self, gateway):
         client, _, _ = gateway
@@ -31,7 +44,7 @@ class TestCapabilities:
         default = await client.get("/v1/capabilities", headers=auth())
         flat = await client.get("/v1/capabilities?provider=flat", headers=auth())
 
-        assert default.json()["scope_dims"] == ["subject", "agent", "session"]
+        assert default.json()["scope_dims"] == ["tenant", "subject", "agent", "session"]
         assert flat.json()["scope_dims"] == ["subject"]
 
     async def test_an_unknown_provider_is_a_400_naming_the_real_ones(self, gateway):
@@ -50,6 +63,7 @@ class TestOpenApi:
             "/v1/memories:upsert",
             "/v1/memories:search",
             "/v1/memories:delete",
+            "/v1/memories:list",
             "/v1/memories/{gateway_id}",
             "/v1/subjects/{subject}",
             "/v1/subjects/{subject}:rebind",

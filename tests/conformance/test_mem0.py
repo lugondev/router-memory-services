@@ -9,6 +9,7 @@ memory look like it works and recall a blank.
 from __future__ import annotations
 
 import os
+import uuid
 
 import pytest
 
@@ -74,12 +75,50 @@ class TestDeclaredNature:
         assert caps.consistency == "eventual"
 
 
+def live_config(collection: str) -> dict:
+    """A Mem0 that actually starts. Three things pinned, each learned from a failure.
+
+    *The model.* Mem0 sends ``temperature=0.1`` and ``top_p=0.1`` with every
+    extraction, and a reasoning model rejects both with a 400. The default model is
+    whatever Mem0 ships this week, so this pins one that takes them.
+
+    *A Qdrant server, not local mode.* Local Qdrant persists through SQLite, and
+    ``AsyncMemory`` dispatches every call with ``asyncio.to_thread`` -- so each call
+    arrives on a different pool thread and SQLite refuses it. Local mode also flocks
+    its directory, so a second adapter in the same process cannot open one at all.
+    Neither is memgw's bug and neither is fixable from the adapter; the answer is a
+    server. ``docker run -p 6333:6333 qdrant/qdrant``.
+
+    *A collection per adapter.* Each test starts empty, which is what makes the
+    isolation checks mean anything.
+    """
+    return {
+        "llm": {
+            "provider": "openai",
+            "config": {"model": os.environ.get("MEMGW_MEM0_MODEL", "gpt-4o-mini")},
+        },
+        "embedder": {
+            "provider": "openai",
+            "config": {"model": "text-embedding-3-small"},
+        },
+        "vector_store": {
+            "provider": "qdrant",
+            "config": {
+                "host": os.environ.get("MEMGW_QDRANT_HOST", "localhost"),
+                "port": int(os.environ.get("MEMGW_QDRANT_PORT", "6333")),
+                "collection_name": collection,
+            },
+        },
+    }
+
+
 @pytest.mark.skipif(
     os.environ.get("MEMGW_MEM0_TEST") != "1",
-    reason="needs a configured Mem0 (LLM + embedder); set MEMGW_MEM0_TEST=1 to run",
+    reason="needs a real Mem0 (OPENAI_API_KEY + a Qdrant server); set MEMGW_MEM0_TEST=1",
 )
 class TestMem0Conformance(ConformanceSuite):
-    settle_timeout = 15.0
+    #: Mem0 declares eventual consistency and means it -- extraction is an LLM call.
+    settle_timeout = 30.0
 
     async def make_adapter(self):
-        return Mem0Adapter()
+        return Mem0Adapter(live_config(f"memgw_{uuid.uuid4().hex[:12]}"))

@@ -26,7 +26,11 @@ def _load_builtins() -> None:
     if _LOADED:
         return
     _LOADED = True
-    for module in ("memgw.adapters.pgvector", "memgw.adapters.mem0"):
+    # Every shipped adapter belongs here. An adapter absent from this list exists,
+    # imports, and is entirely invisible to available() and get() -- which is how the
+    # Zep adapter spent an afternoon reachable through the environment and through no
+    # other route at all. tests/test_registry.py checks the list against what ships.
+    for module in ("memgw.adapters.pgvector", "memgw.adapters.mem0", "memgw.adapters.zep"):
         try:
             __import__(module)
         except ImportError:

@@ -35,6 +35,23 @@ class TestTheSuiteActuallyBites:
         with pytest.raises(AssertionError, match="could read"):
             await _Broken().test_one_subject_cannot_read_another_subjects_memories()
 
+    async def test_an_adapter_that_honours_subject_but_ignores_tenant_fails(self):
+        """The precise shape of the bug this dimension was added for.
+
+        Subject filtering looks correct in every single-tenant test, so a suite that
+        only checked subjects would pass an adapter that serves two tenants the same
+        row. This is the adapter every provider is before someone remembers tenants.
+        """
+        leaky = FakeAdapter(ignore_dims={"tenant"})
+
+        class _Leaky(ConformanceSuite):
+            async def make_adapter(self):
+                return leaky
+
+        await _Leaky().test_one_subject_cannot_read_another_subjects_memories()
+        with pytest.raises(AssertionError, match="same subject id"):
+            await _Leaky().test_one_tenant_cannot_read_another_tenants_memories()
+
     async def test_a_lying_consistency_declaration_fails(self):
         # Declares read_after_write, behaves eventually.
         liar = FakeAdapter(default_caps(consistency="read_after_write"), write_delay=5.0)

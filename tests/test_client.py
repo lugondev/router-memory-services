@@ -138,9 +138,12 @@ class TestParseScope:
         assert (scope.subject, scope.session) == ("u_1", "s_9")
 
     def test_the_tenant_segment_is_parsed_but_not_carried(self):
-        # Tenant comes from the credential. A tenant in a key is data, not authority.
+        # Tenant comes from the credential. A tenant in a key is data, not authority,
+        # so the segment is consumed by the pattern and then dropped: the gateway
+        # stamps the real one on the way down.
         scope = Memory.parse_scope("t/u_1/s_9", "{tenant}/{subject}/{session}")
-        assert not hasattr(scope, "tenant")
+        assert scope.tenant is None
+        assert scope.subject == "u_1"
 
     def test_a_key_that_does_not_match_is_refused(self):
         with pytest.raises(ValueError, match="does not match"):

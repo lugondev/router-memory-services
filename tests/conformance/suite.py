@@ -102,6 +102,46 @@ class ConformanceSuite:
 
     # -- 2. isolation. never skipped ------------------------------------------
 
+    async def test_one_tenant_cannot_read_another_tenants_memories(self):
+        """The dimension an adapter is most likely to forget, and the most expensive
+        one to forget: subject ids are chosen by tenants, so two of them naming an
+        end-user ``u_1`` is not a hypothetical -- it is the default."""
+        adapter = await self.make_adapter()
+        assert "tenant" in adapter.capabilities().scope_dims, (
+            "an adapter that cannot isolate tenants must not declare it can"
+        )
+
+        mine = Scope(subject="u_1", tenant="tenant-a")
+        theirs = Scope(subject="u_1", tenant="tenant-b")
+
+        await self._write(adapter, "blackcoffee", mine)
+        await self._settle(adapter, "blackcoffee", mine)
+
+        leaked = await self._find(adapter, "blackcoffee", theirs)
+        assert not any("blackcoffee" in hit.content for hit in leaked), (
+            "tenant-b read tenant-a's memory by naming the same subject id"
+        )
+
+    async def test_one_tenants_erasure_leaves_another_tenant_alone(self):
+        adapter = await self.make_adapter()
+        if not adapter.capabilities().supports_delete_by_scope:
+            pytest.skip("adapter declares no delete-by-scope")
+
+        mine = Scope(subject="u_1", tenant="tenant-a")
+        theirs = Scope(subject="u_1", tenant="tenant-b")
+        await self._write(adapter, "jasmine", mine)
+        await self._write(adapter, "jasmine", theirs)
+        await self._settle(adapter, "jasmine", mine)
+        await self._settle(adapter, "jasmine", theirs)
+
+        await adapter.delete_scope(mine)
+        await self._await_absent(adapter, "jasmine", mine)
+
+        survivors = await self._find(adapter, "jasmine", theirs)
+        assert any("jasmine" in hit.content for hit in survivors), (
+            "one tenant's erasure deleted another tenant's memories"
+        )
+
     async def test_one_subject_cannot_read_another_subjects_memories(self):
         adapter = await self.make_adapter()
         mine = Scope(subject="u_1", agent="lugo", session="s_9")
@@ -200,18 +240,48 @@ class ConformanceSuite:
             with pytest.raises(UnsupportedCapability):
                 await adapter.search(SearchQuery(query="chamomile", mode=mode), scope)
 
+    async def test_a_declared_listing_returns_the_scope_without_a_query(self):
+        adapter = await self.make_adapter()
+        if not adapter.capabilities().supports_list:
+            pytest.skip("adapter declares no scope listing")
+
+        scope = Scope(subject="u_1", tenant="tenant-a")
+        await self._write(adapter, "peppermint", scope)
+        await self._settle(adapter, "peppermint", scope)
+
+        listed = await adapter.list_scope(scope, 50)
+        assert any("peppermint" in memory.content for memory in listed)
+
+        other = await adapter.list_scope(Scope(subject="u_2", tenant="tenant-a"), 50)
+        assert not any("peppermint" in memory.content for memory in other), (
+            "list_scope ignored the scope it was given"
+        )
+
     async def test_declared_write_verbs_are_the_ones_that_work(self):
+        """A declared verb must be *accepted*; it need not produce a memory.
+
+        ``ingest`` hands raw material to a provider that decides what is worth
+        remembering, and "nothing here" is a correct answer -- deciding that is the
+        thing the commercial providers are for. An earlier version of this check
+        asserted a non-empty result and failed against real Mem0, which looked at the
+        word "hibiscus" on its own and quite reasonably kept nothing. That was the
+        suite being wrong, not the provider.
+
+        What still fails here: an adapter that declares a verb and then refuses it.
+        """
         adapter = await self.make_adapter()
         caps = adapter.capabilities()
-        scope = Scope(subject="u_1")
+        scope = Scope(subject="u_1", tenant="tenant-a")
+        episode = Episode(text="Remember that I drink my coffee black, no sugar.")
 
         if caps.supports_ingest:
-            assert await adapter.ingest(Episode(text="hibiscus"), scope)
+            assert isinstance(await adapter.ingest(episode, scope), list)
         else:
             with pytest.raises(UnsupportedCapability):
-                await adapter.ingest(Episode(text="hibiscus"), scope)
+                await adapter.ingest(episode, scope)
 
         if caps.supports_upsert:
+            # upsert stores what it is given, so here an empty result *is* a failure.
             assert await adapter.upsert(["lavender"], scope)
         else:
             with pytest.raises(UnsupportedCapability):

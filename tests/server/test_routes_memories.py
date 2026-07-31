@@ -147,7 +147,9 @@ class TestSearch:
             headers=auth(),
         )
         assert response.status_code == 422
-        assert response.json()["error"]["details"]["missing_scope_dims"] == ["agent"]
+        # Tenant leads: the "flat" provider models neither, and losing tenant
+        # isolation is the more serious of the two.
+        assert response.json()["error"]["details"]["missing_scope_dims"] == ["tenant", "agent"]
 
 
 class TestGetUpdateDelete:
@@ -181,13 +183,22 @@ class TestGetUpdateDelete:
         assert response.json()["deleted"] == 2
 
 
-class TestReservedVerbs:
-    async def test_upsert_is_published_and_returns_501(self, gateway):
+class TestUpsert:
+    async def test_ready_made_facts_go_straight_in(self, gateway):
         client, _, _ = gateway
         response = await client.post(
             "/v1/memories:upsert",
             json={"scope": SCOPE, "facts": ["prefers black coffee"]},
             headers=auth(),
         )
-        assert response.status_code == 501
-        assert response.json()["error"]["code"] == "not_implemented"
+        assert response.status_code == 200
+        body = response.json()
+        assert len(body["results"]) == 1
+        assert body["provider"] == "fake"
+
+    async def test_an_empty_fact_list_is_a_400(self, gateway):
+        client, _, _ = gateway
+        response = await client.post(
+            "/v1/memories:upsert", json={"scope": SCOPE, "facts": []}, headers=auth()
+        )
+        assert response.status_code == 400

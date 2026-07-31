@@ -35,6 +35,22 @@ class DegradeResult(BaseModel):
     lost: list[str]
 
 
+def assert_as_of_supported(caps: Capabilities) -> None:
+    """Never degrades, and not because point-in-time recall is precious.
+
+    Silently dropping ``as_of`` answers a *different question* than the one asked --
+    "what is true now" in place of "what was true then" -- and returns a confident,
+    well-formed, wrong answer. A quality knob may be turned down; the question may
+    not be swapped.
+    """
+    if "temporal" not in caps.search_modes:
+        raise UnsupportedCapability(
+            "provider cannot answer as-of a past time; serving the present instead "
+            "would answer a different question",
+            details={"available": list(caps.search_modes)},
+        )
+
+
 def resolve_mode(
     requested: SearchMode, caps: Capabilities, on_unsupported: OnUnsupported
 ) -> DegradeResult:

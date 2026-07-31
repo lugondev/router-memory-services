@@ -6,3 +6,9 @@ __pycache__/
 *.sqlite3
 .pytest_cache/
 .ruff_cache/
+
+# .env.example tells you to `cp .env.example .env` and put a live key in it, so
+# .env must never be committable. The example stays tracked; the real one cannot.
+.env
+.env.*
+!.env.example

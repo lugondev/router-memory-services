@@ -9,25 +9,82 @@ client ends up retrying something that will never work.
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import ValidationError
 
+from memgw.catalog import new_id
 from memgw.core import MemoryCore
 from memgw.errors import GatewayError, InvalidRequest
+from memgw.observability import current_request_id
 from memgw.server.auth import ApiKeyAuth
 from memgw.server.routes import router
 
 
-def create_app(*, core: MemoryCore, api_keys: dict[str, str]) -> FastAPI:
+def create_app(
+    *,
+    core: MemoryCore | None = None,
+    core_factory: Callable[[], Awaitable[MemoryCore]] | None = None,
+    api_keys: dict[str, str],
+    docs: bool = True,
+) -> FastAPI:
+    """The gateway app.
+
+    ``core`` for a core you already built; ``core_factory`` for one that has to be
+    awaited. The factory form exists because building a core opens databases, and
+    an ASGI app must be constructible **without a running event loop** -- uvicorn's
+    ``--factory`` calls its factory synchronously. Opening connections in a
+    temporary loop and then serving from a different one is the other way to write
+    this, and it fails later and more confusingly.
+
+    ``docs`` turns off ``/docs`` and ``/redoc``. They need no credential and leak
+    only the shape of the API, but a gateway standing in front of other people's
+    memories should be able to decline to advertise itself.
+    """
+    if (core is None) == (core_factory is None):
+        raise ValueError("pass exactly one of core= / core_factory=")
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        if core_factory is not None:
+            app.state.core = await core_factory()
+        yield
+        built = getattr(app.state, "core", None)
+        if built is not None and core_factory is not None:
+            # Only close what this app opened. A caller-supplied core has a lifetime
+            # the caller owns.
+            await built.catalog.close()
+
     app = FastAPI(
         title="memgw",
         version="0.1.0",
         summary="One API in front of any AI memory provider",
+        docs_url="/docs" if docs else None,
+        redoc_url="/redoc" if docs else None,
+        lifespan=lifespan,
     )
     app.state.core = core
     app.state.auth = ApiKeyAuth(api_keys)
+
+    @app.middleware("http")
+    async def _request_id(request: Request, call_next):
+        """One id per request, echoed back and put on every log record the request
+        produces. Without it an access log of a concurrent gateway is a pile of
+        unrelated lines, and correlating a caller's complaint with what the gateway
+        did means guessing from timestamps."""
+        incoming = request.headers.get("x-request-id")
+        request_id = incoming or new_id("req")
+        token = current_request_id.set(request_id)
+        try:
+            response = await call_next(request)
+        finally:
+            current_request_id.reset(token)
+        response.headers["x-request-id"] = request_id
+        return response
 
     @app.exception_handler(GatewayError)
     async def _gateway_error(request: Request, exc: GatewayError) -> JSONResponse:

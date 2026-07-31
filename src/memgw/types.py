@@ -25,6 +25,14 @@ class Scope(BaseModel):
     session: str | None = None
     labels: dict[str, str] = Field(default_factory=dict)
 
+    tenant: str | None = None
+    """Stamped by the gateway from the credential on the way down to the adapter, and
+    **never** read from a caller's payload -- :meth:`under` overwrites whatever was
+    there. It is a scope dimension rather than gateway bookkeeping because subject ids
+    are chosen by tenants: two tenants naming an end-user ``u_1`` share one row in any
+    provider that is only filtered by subject, and neither of them ever finds out.
+    """
+
     @field_validator("subject")
     @classmethod
     def _subject_must_be_real(cls, v: str) -> str:
@@ -39,6 +47,19 @@ class Scope(BaseModel):
             return None
         return v.strip() or None
 
+    def under(self, tenant: str) -> Scope:
+        """The same scope, stamped with the credential's tenant.
+
+        Overwrites rather than merges: a tenant that arrived in the request body is a
+        claim, and a claim may never widen what the credential already decided.
+        """
+        return self.model_copy(update={"tenant": tenant})
+
+    def without_tenant(self) -> Scope:
+        """What the caller gets back. They asked about ``u_1``, not about
+        ``tenant-a/u_1``; echoing the stamp back is noise in every response."""
+        return self.model_copy(update={"tenant": None})
+
     def dims(self) -> dict[str, str]:
         """The dimensions actually set -- exactly what a provider filter must cover.
 
@@ -46,7 +67,10 @@ class Scope(BaseModel):
         with no error on at least one provider, so filters are built from this and
         never from a subset.
         """
-        out = {"subject": self.subject}
+        out = {}
+        if self.tenant:
+            out["tenant"] = self.tenant
+        out["subject"] = self.subject
         if self.agent:
             out["agent"] = self.agent
         if self.session:

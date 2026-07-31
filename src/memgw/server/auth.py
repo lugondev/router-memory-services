@@ -8,15 +8,25 @@ own identifiers can read another tenant's memory by crafting one.
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 from dataclasses import dataclass
 
 from memgw.errors import TenantMismatch, Unauthenticated
 
 
+def _digest(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
 @dataclass(frozen=True)
 class Principal:
     tenant_id: str
+
     key_id: str
+    """A digest prefix, never the key. Principals end up in logs and error contexts,
+    and a "harmless" first-eight-characters convention puts a third of a short key
+    into every access log line."""
 
 
 class ApiKeyAuth:
@@ -29,7 +39,10 @@ class ApiKeyAuth:
     """
 
     def __init__(self, keys: dict[str, str]) -> None:
-        self._keys = dict(keys)
+        #: Keyed by digest, so the raw keys are not held in memory and a lookup cannot
+        #: leak how far a guess got. Dict lookup on a raw token compares byte by byte
+        #: and stops at the first difference, which is a measurable oracle.
+        self._by_digest = {_digest(key): tenant for key, tenant in keys.items()}
 
     def authenticate(self, header: str | None) -> Principal:
         if not header:
@@ -39,10 +52,16 @@ class ApiKeyAuth:
         if scheme.lower() != "bearer" or not token:
             raise Unauthenticated("expected 'Authorization: Bearer <key>'")
 
-        tenant = self._keys.get(token)
+        digest = _digest(token)
+        tenant = None
+        for known, owner in self._by_digest.items():
+            # Every candidate is compared, and each comparison is constant time, so
+            # neither the answer nor the time taken depends on how close a guess was.
+            if hmac.compare_digest(known, digest):
+                tenant = owner
         if tenant is None:
             raise Unauthenticated("unknown api key")
-        return Principal(tenant_id=tenant, key_id=token[:8])
+        return Principal(tenant_id=tenant, key_id=digest[:12])
 
 
 def assert_no_wider_tenant(principal: Principal, asserted: str | None) -> None:

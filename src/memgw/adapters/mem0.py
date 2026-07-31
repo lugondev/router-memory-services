@@ -25,11 +25,32 @@ from memgw.types import Episode, HealthStatus, ProviderMemory, Scope, SearchQuer
 #: "must be null", which is the silent-empty-recall bug.
 ANY = "*"
 
+#: Separates the tenant from the subject inside ``user_id``. Mem0 has no tenant of
+#: its own, so isolation has to be carried by the one dimension it does index.
+TENANT_SEP = ":"
+
+#: Mem0 caps what one listing returns. The number matters less than the fact that a
+#: cap exists: an erasure that stops at the first page reports success and leaves
+#: the rest of somebody's memories in place.
+PAGE = 1000
+
+
+def user_id(scope: Scope) -> str:
+    """``tenant:subject``, or just ``subject`` when the gateway set no tenant.
+
+    Mem0 filters by ``user_id`` and knows nothing about tenants, so two tenants that
+    both call an end-user ``u_1`` are one user to it. Namespacing here is what keeps
+    a shared Mem0 instance from being a shared memory.
+    """
+    if scope.tenant:
+        return f"{scope.tenant}{TENANT_SEP}{scope.subject}"
+    return scope.subject
+
 
 def build_filters(scope: Scope) -> dict[str, Any]:
     """Every dimension, always. Unset ones become the wildcard rather than absent."""
     return {
-        "user_id": scope.subject,
+        "user_id": user_id(scope),
         "agent_id": scope.agent or ANY,
         "run_id": scope.session or ANY,
     }
@@ -37,7 +58,7 @@ def build_filters(scope: Scope) -> dict[str, Any]:
 
 def write_ids(scope: Scope) -> dict[str, Any]:
     """Writes name only what is actually set -- a wildcard is meaningless on a write."""
-    ids: dict[str, Any] = {"user_id": scope.subject}
+    ids: dict[str, Any] = {"user_id": user_id(scope)}
     if scope.agent:
         ids["agent_id"] = scope.agent
     if scope.session:
@@ -65,10 +86,12 @@ class Mem0Adapter:
             supports_update=True,
             supports_delete=True,
             supports_delete_by_scope=True,
+            supports_list=True,
             search_modes=["semantic"],
             supports_score=True,
             max_limit=100,
-            scope_dims=["subject", "agent", "session"],
+            # Mem0 has no tenant of its own; the adapter carries it inside user_id.
+            scope_dims=["tenant", "subject", "agent", "session"],
             supports_labels=True,
             memory_model="flat_facts",
             dedup="provider",
@@ -157,18 +180,33 @@ class Mem0Adapter:
         return True
 
     async def delete_scope(self, scope: Scope) -> int:
-        """Enumerate then delete, rather than calling delete_all.
+        """Enumerate then delete, page after page, until the scope is empty.
 
-        delete_all takes the same entity ids but not the wildcard, so its behaviour
-        for an unset dimension is exactly the ambiguity this adapter exists to avoid.
-        Listing under the explicit filter and deleting what comes back is slower and
-        unambiguous.
+        Two decisions here, both about not lying:
+
+        Not ``delete_all``: it takes the same entity ids but not the wildcard, so its
+        behaviour for an unset dimension is exactly the ambiguity this adapter exists
+        to avoid.
+
+        Not one page: a single listing is capped, and stopping there deletes the first
+        thousand memories and reports success. Erasure is the one promise that must
+        not be partially kept quietly, so this drains and then verifies.
         """
-        raw = await self._client.get_all(filters=build_filters(scope), top_k=1000)
-        doomed = self._to_memories(raw)
-        for memory in doomed:
-            await self._client.delete(memory.native_id)
-        return len(doomed)
+        removed = 0
+        while True:
+            raw = await self._client.get_all(filters=build_filters(scope), top_k=PAGE)
+            page = self._to_memories(raw)
+            if not page:
+                return removed
+            for memory in page:
+                await self._client.delete(memory.native_id)
+            removed += len(page)
+            if len(page) < PAGE:
+                return removed
+
+    async def list_scope(self, scope: Scope, limit: int) -> list[ProviderMemory]:
+        raw = await self._client.get_all(filters=build_filters(scope), top_k=limit)
+        return self._to_memories(raw)[:limit]
 
     # -- internals ------------------------------------------------------------
 

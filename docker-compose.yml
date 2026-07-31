@@ -1,0 +1,59 @@
+# The whole gateway, from a .env file.
+#
+#   cp .env.example .env      # put your keys in it
+#   docker compose up -d
+#   curl localhost:8080/healthz
+#
+# Postgres and Qdrant are both here because the honest defaults need them: SQLite
+# is fine for one process and wrong for two, and Mem0's local vector store
+# deadlocks under async. Neither is optional in a deployment you intend to keep.
+services:
+  memgw:
+    build: .
+    env_file: .env
+    environment:
+      MEMGW_CATALOG_URL: postgresql+asyncpg://memgw:memgw@postgres:5432/memgw
+      MEMGW_PGVECTOR_URL: postgresql+asyncpg://memgw:memgw@postgres:5432/memgw
+      MEMGW_QDRANT_HOST: qdrant
+      MEMGW_QDRANT_PORT: "6333"
+      MEM0_TELEMETRY: "False"
+      # Pinned, and listed after env_file so it wins over anything in .env. The
+      # port *inside* the container is an implementation detail of this file; the
+      # port you connect to is MEMGW_HOST_PORT. Letting one variable mean both is
+      # how you get a container listening on a port nothing is mapped to.
+      MEMGW_PORT: "8080"
+    ports:
+      - "${MEMGW_HOST_PORT:-8080}:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      qdrant:
+        condition: service_started
+    restart: unless-stopped
+
+  postgres:
+    # pgvector's image, not plain postgres: the self-hosted adapter stores a real
+    # `vector` column and orders with `<=>`. Stock postgres has no such type, and
+    # the adapter would fail at CREATE EXTENSION -- loudly, but at first boot.
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: memgw
+      POSTGRES_PASSWORD: memgw
+      POSTGRES_DB: memgw
+    volumes:
+      - memgw-pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U memgw"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  qdrant:
+    image: qdrant/qdrant:latest
+    volumes:
+      - memgw-qdrant:/qdrant/storage
+    restart: unless-stopped
+
+volumes:
+  memgw-pg:
+  memgw-qdrant:

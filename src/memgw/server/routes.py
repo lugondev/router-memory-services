@@ -11,7 +11,8 @@ from memgw.server.schemas import (
     DeleteScopeIn,
     DeleteScopeOut,
     IngestIn,
-    IngestOut,
+    ListIn,
+    ListOut,
     ProviderOut,
     RebindIn,
     RebindOut,
@@ -19,8 +20,9 @@ from memgw.server.schemas import (
     SearchOut,
     UpdateIn,
     UpsertIn,
+    WriteOut,
 )
-from memgw.types import Episode
+from memgw.types import Episode, SearchQuery
 
 router = APIRouter(prefix="/v1")
 
@@ -37,24 +39,37 @@ def principal(request: Request, authorization: str | None = Header(default=None)
     return _auth(request).authenticate(authorization)
 
 
-@router.post("/memories:ingest", response_model=IngestOut)
-async def ingest(
-    body: IngestIn, request: Request, who: Principal = Depends(principal)
-) -> IngestOut:
+@router.post("/memories:ingest", response_model=WriteOut)
+async def ingest(body: IngestIn, request: Request, who: Principal = Depends(principal)) -> WriteOut:
+    assert_no_wider_tenant(who, body.tenant)
+    episode = Episode(messages=body.messages, text=body.text, metadata=body.metadata)
+    result = await _core(request).ingest(who.tenant_id, episode, body.scope, provider=body.provider)
+    return WriteOut(results=result.results, provider=result.provider)
+
+
+@router.post("/memories:upsert", response_model=WriteOut)
+async def upsert(body: UpsertIn, request: Request, who: Principal = Depends(principal)) -> WriteOut:
+    """Ready-made facts in, no extraction. Same shape out as ``:ingest``."""
+    assert_no_wider_tenant(who, body.tenant)
+    result = await _core(request).upsert(
+        who.tenant_id, body.facts, body.scope, provider=body.provider
+    )
+    return WriteOut(results=result.results, provider=result.provider)
+
+
+@router.post("/memories:list", response_model=ListOut)
+async def list_scope(
+    body: ListIn, request: Request, who: Principal = Depends(principal)
+) -> ListOut:
+    """Everything in a scope, no query -- what an export or a subject access request
+    needs, and what search could never answer."""
     assert_no_wider_tenant(who, body.tenant)
     core = _core(request)
-    episode = Episode(messages=body.messages, text=body.text, metadata=body.metadata)
-    records = await core.ingest(who.tenant_id, episode, body.scope, provider=body.provider)
-    resolved = records[0].provider if records else (body.provider or core.default_provider or "")
-    return IngestOut(results=records, provider=resolved)
-
-
-@router.post("/memories:upsert")
-async def upsert(body: UpsertIn, request: Request, who: Principal = Depends(principal)) -> None:
-    # Specified now, built with the migration engine. Always raises 501; the route
-    # exists so the shape is published and adding it later is not a breaking change.
-    assert_no_wider_tenant(who, body.tenant)
-    await _core(request).upsert(who.tenant_id, body.facts, body.scope, provider=body.provider)
+    records = await core.list_scope(
+        who.tenant_id, body.scope, limit=body.limit, provider=body.provider
+    )
+    provider = await core.catalog.get_binding(who.tenant_id, body.scope.subject)
+    return ListOut(results=records, provider=provider or core.default_provider or "")
 
 
 @router.post("/memories:search", response_model=SearchOut)
@@ -65,8 +80,6 @@ async def search(
     query = body.model_dump(
         include={"query", "mode", "limit", "min_score", "as_of", "on_unsupported", "fail_open"}
     )
-    from memgw.types import SearchQuery
-
     result = await _core(request).search(
         who.tenant_id, SearchQuery(**query), body.scope, provider=body.provider
     )

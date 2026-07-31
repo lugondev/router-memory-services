@@ -12,6 +12,7 @@ state that outlives a process, and state that outlives a process is a server.
 
 from __future__ import annotations
 
+import asyncio
 import re
 from typing import Any
 
@@ -20,7 +21,7 @@ import httpx
 from memgw import adapters
 from memgw.capabilities import Capabilities
 from memgw.catalog import Catalog
-from memgw.core import MemoryCore, SearchResult
+from memgw.core import DEFAULT_LIST_LIMIT, MemoryCore, SearchResult
 from memgw.errors import GatewayError
 from memgw.types import Episode, MemoryRecord, Message, Scope, SearchQuery
 
@@ -63,6 +64,14 @@ class ScopeHandle:
     ) -> SearchResult:
         return await self._client.search(self._scope(session, labels), query, **kwargs)
 
+    async def remember(self, *facts: str, session: str | None = None) -> list[MemoryRecord]:
+        """``await person.remember("prefers black coffee")`` -- the short way to store
+        a fact you already know is worth keeping."""
+        return await self._client.upsert(self._scope(session), list(facts))
+
+    async def everything(self, *, session: str | None = None, limit: int = DEFAULT_LIST_LIMIT):
+        return await self._client.list_scope(self._scope(session), limit=limit)
+
     async def delete_all(self, *, session: str | None = None) -> int:
         return await self._client.delete_scope(self._scope(session))
 
@@ -93,6 +102,10 @@ class Memory:
         self._journal = journal
         self._core: MemoryCore | None = None
         self._adapter: Any = None
+        #: Startup is lazy, so the first two concurrent calls both find no core and
+        #: both build one -- two engines, two connection pools, and a catalog whose
+        #: ids are minted by whichever won.
+        self._start_lock = asyncio.Lock()
 
         self._http = http
         self._base_url = base_url
@@ -144,7 +157,7 @@ class Memory:
         if self._provider:
             core = await self._started()
             episode = Episode(messages=normalised, text=text, metadata=metadata or {})
-            return await core.ingest(EMBEDDED_TENANT, episode, scope)
+            return (await core.ingest(EMBEDDED_TENANT, episode, scope)).results
 
         body = {
             "scope": scope.model_dump(),
@@ -153,6 +166,33 @@ class Memory:
             "metadata": metadata or {},
         }
         payload = await self._post("/v1/memories:ingest", body)
+        return [MemoryRecord(**record) for record in payload["results"]]
+
+    async def upsert(self, scope: Scope, facts: list[str]) -> list[MemoryRecord]:
+        """Store facts you already decided are worth keeping, with no extraction step.
+
+        The verb to reach for when the calling application knows its own domain better
+        than a general-purpose extractor does.
+        """
+        if self._provider:
+            core = await self._started()
+            return (await core.upsert(EMBEDDED_TENANT, facts, scope)).results
+        payload = await self._post(
+            "/v1/memories:upsert", {"scope": scope.model_dump(), "facts": facts}
+        )
+        return [MemoryRecord(**record) for record in payload["results"]]
+
+    async def list_scope(
+        self, scope: Scope, *, limit: int = DEFAULT_LIST_LIMIT
+    ) -> list[MemoryRecord]:
+        """Everything held in a scope, no query. What an export or a "what do you know
+        about me" request actually needs."""
+        if self._provider:
+            core = await self._started()
+            return await core.list_scope(EMBEDDED_TENANT, scope, limit=limit)
+        payload = await self._post(
+            "/v1/memories:list", {"scope": scope.model_dump(), "limit": limit}
+        )
         return [MemoryRecord(**record) for record in payload["results"]]
 
     async def search(self, scope: Scope, query: str, **kwargs: Any) -> SearchResult:
@@ -218,20 +258,25 @@ class Memory:
         if self._core is not None:
             return self._core
 
-        assert self._provider is not None
-        self._adapter = adapters.build(self._provider, **self._config)
-        if hasattr(self._adapter, "init"):
-            await self._adapter.init()
+        async with self._start_lock:
+            if self._core is not None:  # somebody built it while we waited
+                return self._core
 
-        catalog = Catalog(self._catalog_url)
-        await catalog.init()
-        self._core = MemoryCore(
-            catalog=catalog,
-            providers={self._provider: self._adapter},
-            default_provider=self._provider,
-            journal_enabled=self._journal,
-        )
-        return self._core
+            assert self._provider is not None
+            adapter = adapters.build(self._provider, **self._config)
+            if hasattr(adapter, "init"):
+                await adapter.init()
+
+            catalog = Catalog(self._catalog_url)
+            await catalog.init()
+            self._adapter = adapter
+            self._core = MemoryCore(
+                catalog=catalog,
+                providers={self._provider: adapter},
+                default_provider=self._provider,
+                journal_enabled=self._journal,
+            )
+            return self._core
 
     def _client(self) -> httpx.AsyncClient:
         if self._http is None:

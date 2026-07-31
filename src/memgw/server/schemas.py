@@ -21,7 +21,8 @@ class _Scoped(BaseModel):
     scope: Scope
     provider: str | None = None
     tenant: str | None = None
-    """Optional and only ever checked. The real tenant comes from the credential."""
+    """Optional and only ever checked. The real tenant comes from the credential --
+    including ``scope.tenant``, which the gateway overwrites rather than reads."""
 
 
 class IngestIn(_Scoped):
@@ -31,7 +32,11 @@ class IngestIn(_Scoped):
 
 
 class UpsertIn(_Scoped):
-    facts: list[str]
+    facts: list[str] = Field(min_length=1)
+
+
+class ListIn(_Scoped):
+    limit: int = Field(default=100, ge=1)
 
 
 class SearchIn(_Scoped):
@@ -70,7 +75,21 @@ class SearchOut(BaseModel):
     provider_unavailable: bool
 
 
-class IngestOut(BaseModel):
+class WriteOut(BaseModel):
+    results: list[MemoryRecord]
+    provider: str
+    """Named even when ``results`` is empty: an extraction that kept nothing still
+    went to a provider, and a caller reconciling its own records needs to know which."""
+
+
+#: The two write verbs answer with the same shape, so a caller can handle them the
+#: same way. Kept as an alias rather than collapsed: the names appear in the OpenAPI
+#: document, and ``IngestOut`` is what the published contract already called it.
+IngestOut = WriteOut
+UpsertOut = WriteOut
+
+
+class ListOut(BaseModel):
     results: list[MemoryRecord]
     provider: str
 
