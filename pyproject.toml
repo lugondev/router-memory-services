@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "memgw"
+version = "0.1.0"
+description = "One API in front of any AI memory provider"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "pydantic>=2.7",
+  "sqlalchemy[asyncio]>=2.0",
+  "aiosqlite>=0.20",
+  "httpx>=0.27",
+]
+
+[project.optional-dependencies]
+# The HTTP gateway. Embedded mode does not need it, so it is not a base dependency.
+server = ["fastapi>=0.115", "uvicorn[standard]>=0.30"]
+# Postgres + real pgvector. SQLite is the default and needs neither.
+postgres = ["asyncpg>=0.29", "pgvector>=0.3"]
+# Inert until installed; adapters.available() omits mem0 without it.
+mem0 = ["mem0ai>=0.1.0"]
+dev = ["pytest>=8.3", "pytest-asyncio>=0.23", "ruff>=0.6", "fastapi>=0.115"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+filterwarnings = ["error::DeprecationWarning:memgw.*"]
+
+[tool.ruff]
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
