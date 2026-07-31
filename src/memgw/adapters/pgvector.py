@@ -136,7 +136,9 @@ class PgvectorAdapter:
         vectors = await self._embedder.embed(facts)
         now = _now()
         rows = []
-        for fact, vector in zip(facts, vectors):
+        # strict: an embedder returning a different number of vectors than facts is a
+        # bug that would otherwise silently drop memories.
+        for fact, vector in zip(facts, vectors, strict=True):
             rows.append(
                 {
                     "native_id": new_id("pv"),
@@ -202,8 +204,10 @@ class PgvectorAdapter:
     async def get(self, native_id: str) -> ProviderMemory | None:
         async with self._engine.connect() as conn:
             row = (
-                await conn.execute(select(memories).where(memories.c.native_id == native_id))
-            ).mappings().one_or_none()
+                (await conn.execute(select(memories).where(memories.c.native_id == native_id)))
+                .mappings()
+                .one_or_none()
+            )
         return None if row is None else self._to_memory(row, None)
 
     # -- delete ---------------------------------------------------------------

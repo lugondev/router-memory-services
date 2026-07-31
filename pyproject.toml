@@ -38,3 +38,8 @@ src = ["src", "tests"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
+
+[tool.ruff.lint.flake8-bugbear]
+# FastAPI's dependency injection is expressed exactly this way; B008 is not a
+# finding here, it is the framework.
+extend-immutable-calls = ["fastapi.Depends", "fastapi.Query", "fastapi.Header"]

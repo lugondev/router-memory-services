@@ -22,9 +22,7 @@ class TestIngest:
     async def test_a_body_with_neither_text_nor_messages_is_a_400(self, gateway):
         # 422 is reserved for unsupported_capability; a malformed body is a 400.
         client, _, _ = gateway
-        response = await client.post(
-            "/v1/memories:ingest", json={"scope": SCOPE}, headers=auth()
-        )
+        response = await client.post("/v1/memories:ingest", json={"scope": SCOPE}, headers=auth())
         assert response.status_code == 400
         assert response.json()["error"]["code"] == "invalid_request"
 
@@ -70,7 +68,10 @@ class TestSearch:
         await ingest(client, "coffee one")
         await client.post(
             "/v1/memories:ingest",
-            json={"scope": {"subject": "u_1", "agent": "lugo", "session": "s_2"}, "text": "coffee two"},
+            json={
+                "scope": {"subject": "u_1", "agent": "lugo", "session": "s_2"},
+                "text": "coffee two",
+            },
             headers=auth(),
         )
         response = await client.post(
@@ -175,9 +176,7 @@ class TestGetUpdateDelete:
         await ingest(client, "coffee one")
         await ingest(client, "coffee two")
 
-        response = await client.post(
-            "/v1/memories:delete", json={"scope": SCOPE}, headers=auth()
-        )
+        response = await client.post("/v1/memories:delete", json={"scope": SCOPE}, headers=auth())
         assert response.status_code == 200
         assert response.json()["deleted"] == 2
 

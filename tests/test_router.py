@@ -19,7 +19,9 @@ class TestResolution:
         assert await resolve_provider(catalog, "t1", "u_1", default_provider="pgvector") == "mem0"
 
     async def test_an_unbound_subject_falls_back_to_the_default(self, catalog):
-        assert await resolve_provider(catalog, "t1", "u_1", default_provider="pgvector") == "pgvector"
+        assert (
+            await resolve_provider(catalog, "t1", "u_1", default_provider="pgvector") == "pgvector"
+        )
 
     async def test_no_binding_and_no_default_is_a_refusal_not_a_guess(self, catalog):
         # Picking one here would silently strand this end-user's memories in a

@@ -140,7 +140,9 @@ class FakeAdapter:
         return existed
 
     async def delete_scope(self, scope: Scope) -> int:
-        doomed = [nid for nid, (row_scope, _, _) in self._rows.items() if self._matches(row_scope, scope)]
+        doomed = [
+            nid for nid, (row_scope, _, _) in self._rows.items() if self._matches(row_scope, scope)
+        ]
         for native_id in doomed:
             await self.delete(native_id)
         return len(doomed)

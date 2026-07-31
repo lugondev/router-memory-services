@@ -54,9 +54,7 @@ class Mem0Adapter:
         else:
             from mem0 import AsyncMemory  # imported here so the package stays optional
 
-            self._client = (
-                AsyncMemory.from_config(config) if config else AsyncMemory()
-            )
+            self._client = AsyncMemory.from_config(config) if config else AsyncMemory()
 
     # -- introspection --------------------------------------------------------
 

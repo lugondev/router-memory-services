@@ -35,7 +35,12 @@ class TestResolve:
         gid = await catalog.record("t1", "mem0", "n-1", Scope(subject="u_1", agent="lugo"), "x")
         row = await catalog.resolve_gateway_id("t1", gid)
         assert row is not None
-        assert (row.provider, row.native_id, row.subject, row.agent) == ("mem0", "n-1", "u_1", "lugo")
+        assert (row.provider, row.native_id, row.subject, row.agent) == (
+            "mem0",
+            "n-1",
+            "u_1",
+            "lugo",
+        )
 
     async def test_another_tenants_row_is_invisible(self, catalog):
         # The route turns this into a 404, not a 403: a 403 would confirm the id

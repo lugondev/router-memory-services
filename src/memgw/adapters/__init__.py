@@ -7,7 +7,8 @@ is missing simply never appears in :func:`available` -- ``mem0`` is inert until
 
 from __future__ import annotations
 
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 from memgw.adapters.base import MemoryAdapter
 from memgw.errors import InvalidRequest

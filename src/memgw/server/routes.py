@@ -33,9 +33,7 @@ def _auth(request: Request) -> ApiKeyAuth:
     return request.app.state.auth
 
 
-def principal(
-    request: Request, authorization: str | None = Header(default=None)
-) -> Principal:
+def principal(request: Request, authorization: str | None = Header(default=None)) -> Principal:
     return _auth(request).authenticate(authorization)
 
 
@@ -46,17 +44,13 @@ async def ingest(
     assert_no_wider_tenant(who, body.tenant)
     core = _core(request)
     episode = Episode(messages=body.messages, text=body.text, metadata=body.metadata)
-    records = await core.ingest(
-        who.tenant_id, episode, body.scope, provider=body.provider
-    )
+    records = await core.ingest(who.tenant_id, episode, body.scope, provider=body.provider)
     resolved = records[0].provider if records else (body.provider or core.default_provider or "")
     return IngestOut(results=records, provider=resolved)
 
 
 @router.post("/memories:upsert")
-async def upsert(
-    body: UpsertIn, request: Request, who: Principal = Depends(principal)
-) -> None:
+async def upsert(body: UpsertIn, request: Request, who: Principal = Depends(principal)) -> None:
     # Specified now, built with the migration engine. Always raises 501; the route
     # exists so the shape is published and adding it later is not a breaking change.
     assert_no_wider_tenant(who, body.tenant)
@@ -91,9 +85,7 @@ async def delete_scope(
 
 
 @router.get("/memories/{gateway_id}")
-async def get_memory(
-    gateway_id: str, request: Request, who: Principal = Depends(principal)
-):
+async def get_memory(gateway_id: str, request: Request, who: Principal = Depends(principal)):
     return await _core(request).get(who.tenant_id, gateway_id)
 
 

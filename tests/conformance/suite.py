@@ -50,7 +50,9 @@ class ConformanceSuite:
         assert written, "a write returned no memories"
         return written[0]
 
-    async def _find(self, adapter: MemoryAdapter, needle: str, scope: Scope) -> list[ProviderMemory]:
+    async def _find(
+        self, adapter: MemoryAdapter, needle: str, scope: Scope
+    ) -> list[ProviderMemory]:
         return await adapter.search(SearchQuery(query=needle, limit=50), scope)
 
     async def _settle(self, adapter: MemoryAdapter, needle: str, scope: Scope) -> None:
@@ -71,7 +73,9 @@ class ConformanceSuite:
                     "immediately after the write"
                 )
             if asyncio.get_running_loop().time() >= deadline:
-                raise AssertionError(f"{needle!r} never became visible within {self.settle_timeout}s")
+                raise AssertionError(
+                    f"{needle!r} never became visible within {self.settle_timeout}s"
+                )
             await asyncio.sleep(self.settle_interval)
 
     async def _await_absent(self, adapter: MemoryAdapter, needle: str, scope: Scope) -> None:

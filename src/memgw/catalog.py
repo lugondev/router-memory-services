@@ -272,17 +272,23 @@ class Catalog:
             session=scope.session,
         )
 
-    async def _find_by_native(self, tenant: str, provider: str, native_id: str) -> CatalogRow | None:
+    async def _find_by_native(
+        self, tenant: str, provider: str, native_id: str
+    ) -> CatalogRow | None:
         async with self._engine.connect() as conn:
             row = (
-                await conn.execute(
-                    select(memory_index).where(
-                        memory_index.c.tenant_id == tenant,
-                        memory_index.c.provider == provider,
-                        memory_index.c.native_id == native_id,
+                (
+                    await conn.execute(
+                        select(memory_index).where(
+                            memory_index.c.tenant_id == tenant,
+                            memory_index.c.provider == provider,
+                            memory_index.c.native_id == native_id,
+                        )
                     )
                 )
-            ).mappings().one_or_none()
+                .mappings()
+                .one_or_none()
+            )
         if row is None:
             return None
         return CatalogRow(
@@ -298,14 +304,18 @@ class Catalog:
     async def resolve_gateway_id(self, tenant: str, gateway_id: str) -> CatalogRow | None:
         async with self._engine.connect() as conn:
             row = (
-                await conn.execute(
-                    select(memory_index).where(
-                        memory_index.c.gateway_id == gateway_id,
-                        memory_index.c.tenant_id == tenant,
-                        memory_index.c.deleted_at.is_(None),
+                (
+                    await conn.execute(
+                        select(memory_index).where(
+                            memory_index.c.gateway_id == gateway_id,
+                            memory_index.c.tenant_id == tenant,
+                            memory_index.c.deleted_at.is_(None),
+                        )
                     )
                 )
-            ).mappings().one_or_none()
+                .mappings()
+                .one_or_none()
+            )
         if row is None:
             return None
         return CatalogRow(
@@ -446,15 +456,19 @@ class Catalog:
     async def journal_rows(self, tenant: str, subject: str) -> list[JournalRow]:
         async with self._engine.connect() as conn:
             rows = (
-                await conn.execute(
-                    select(episode_journal)
-                    .where(
-                        episode_journal.c.tenant_id == tenant,
-                        episode_journal.c.subject == subject,
+                (
+                    await conn.execute(
+                        select(episode_journal)
+                        .where(
+                            episode_journal.c.tenant_id == tenant,
+                            episode_journal.c.subject == subject,
+                        )
+                        .order_by(episode_journal.c.episode_id)
                     )
-                    .order_by(episode_journal.c.episode_id)
                 )
-            ).mappings().all()
+                .mappings()
+                .all()
+            )
         return [
             JournalRow(
                 episode_id=row["episode_id"],

@@ -127,9 +127,7 @@ class MemoryCore:
             )
 
         memories = await self._call(adapter, adapter.ingest(episode, scope))
-        records = [
-            await self._record(tenant, name, memory, scope) for memory in memories
-        ]
+        records = [await self._record(tenant, name, memory, scope) for memory in memories]
 
         # Bind on the first write only; bind() will not move an existing binding.
         await self.catalog.bind(tenant, scope.subject, name)
@@ -221,9 +219,7 @@ class MemoryCore:
         await self._call(adapter, adapter.delete(row.native_id))
         await self.catalog.mark_deleted(tenant, gateway_id)
 
-    async def delete_scope(
-        self, tenant: str, scope: Scope, *, provider: str | None = None
-    ) -> int:
+    async def delete_scope(self, tenant: str, scope: Scope, *, provider: str | None = None) -> int:
         name = await self._resolve(tenant, scope.subject, provider)
         adapter = self.adapter(name)
         caps = adapter.capabilities()
