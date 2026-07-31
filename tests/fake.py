@@ -80,6 +80,7 @@ class FakeAdapter:
         return await self.upsert([episode.as_text()], scope)
 
     async def upsert(self, facts: list[str], scope: Scope) -> list[ProviderMemory]:
+        self._require_up()
         out = []
         for fact in facts:
             self._seq += 1
@@ -105,6 +106,7 @@ class FakeAdapter:
     async def search(self, query: SearchQuery, scope: Scope) -> list[ProviderMemory]:
         if query.mode not in self._caps.search_modes or query.mode in self._refuse_modes:
             raise UnsupportedCapability(f"fake adapter cannot serve {query.mode!r}")
+        self._require_up()
 
         wanted = set(query.query.lower().split())
         hits = []
@@ -144,6 +146,10 @@ class FakeAdapter:
         return len(doomed)
 
     # -- internals ------------------------------------------------------------
+
+    def _require_up(self) -> None:
+        if not self._healthy:
+            raise ConnectionError("fake adapter is down")
 
     def _matches(self, row_scope: Scope, filter_scope: Scope) -> bool:
         if self._broken_scope_filter:

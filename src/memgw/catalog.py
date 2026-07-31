@@ -248,6 +248,53 @@ class Catalog:
             )
             return gateway_id
 
+    async def ensure(
+        self, tenant: str, provider: str, native_id: str, scope: Scope, content: str
+    ) -> CatalogRow:
+        """Map a provider-native id to a gateway id *without disturbing what is stored*.
+
+        Search hits go through here rather than :meth:`record`. The scope a caller
+        searched with is often broader than the scope the memory was written with --
+        recall across sessions is the whole point -- so writing the query's scope back
+        over the stored one would quietly widen it and break the next session filter.
+        """
+        found = await self._find_by_native(tenant, provider, native_id)
+        if found is not None:
+            return found
+        gateway_id = await self.record(tenant, provider, native_id, scope, content)
+        return CatalogRow(
+            gateway_id=gateway_id,
+            tenant_id=tenant,
+            provider=provider,
+            native_id=native_id,
+            subject=scope.subject,
+            agent=scope.agent,
+            session=scope.session,
+        )
+
+    async def _find_by_native(self, tenant: str, provider: str, native_id: str) -> CatalogRow | None:
+        async with self._engine.connect() as conn:
+            row = (
+                await conn.execute(
+                    select(memory_index).where(
+                        memory_index.c.tenant_id == tenant,
+                        memory_index.c.provider == provider,
+                        memory_index.c.native_id == native_id,
+                    )
+                )
+            ).mappings().one_or_none()
+        if row is None:
+            return None
+        return CatalogRow(
+            gateway_id=row["gateway_id"],
+            tenant_id=row["tenant_id"],
+            provider=row["provider"],
+            native_id=row["native_id"],
+            subject=row["subject"],
+            agent=row["agent"],
+            session=row["session"],
+        )
+
     async def resolve_gateway_id(self, tenant: str, gateway_id: str) -> CatalogRow | None:
         async with self._engine.connect() as conn:
             row = (
