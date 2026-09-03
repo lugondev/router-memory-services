@@ -382,3 +382,26 @@ every call the adapter makes against the installed client.
 
 Design: `docs/superpowers/specs/2026-07-31-memory-gateway-design.md`
 Plan: `docs/superpowers/plans/2026-07-31-memory-gateway-mvp.md`
+
+---
+
+## Part of LUGO
+
+**LUGO** is a self-hosted AI companion platform — models supply the intelligence, LUGO
+supplies the experience: one assistant that talks, remembers and acts across the browser,
+ESP32 boards and a Raspberry Pi.
+
+This repository is one piece of it. Every client and service talks to the gateway:
+
+| Repo | Role |
+| --- | --- |
+| [lugo-gateway](https://github.com/lugondev/lugo-gateway) | The hub — STT/TTS/LLM engines, auth, device pairing, MCP tools, per-user chat memory. Everything below talks to this. |
+| [lugo-web-client](https://github.com/lugondev/lugo-web-client) | React + TypeScript web client: talk, devices, history, tools. |
+| [esp32-assistant](https://github.com/lugondev/esp32-assistant) | ESP-IDF firmware for ESP32-S3 / ESP32-C3 — a hands-free voice terminal. |
+| [rpi-assistant](https://github.com/lugondev/rpi-assistant) | Raspberry Pi voice client (mic capture, Opus duplex, systemd unit). |
+| [knowledge-api](https://github.com/lugondev/knowledge-api) | **kbase** — RAG knowledge base: documents in, retrievable chunks out. |
+| **router-memory-services** &nbsp;&larr; you are here | **memgw** — one API in front of any AI memory provider (Mem0, Zep, pgvector). |
+| [mcp-basic-tools](https://github.com/lugondev/mcp-basic-tools) | Remote MCP tool server (timedate, fetch, ipinfo, web search). |
+| [livehost-api](https://github.com/lugondev/livehost-api) | TikTok Live AI co-host, an out-of-process gateway plugin. |
+| [voiceprint-api](https://github.com/lugondev/voiceprint-api) | Speaker recognition (3D-Speaker), forked from [xinnan-tech/voiceprint-api](https://github.com/xinnan-tech/voiceprint-api). |
+| lugo-landing | Marketing landing page (bilingual VI/EN). **Private** — a recursive clone will skip it. |
