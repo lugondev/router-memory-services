@@ -404,4 +404,4 @@ This repository is one piece of it. Every client and service talks to the gatewa
 | [mcp-basic-tools](https://github.com/lugondev/mcp-basic-tools) | Remote MCP tool server (timedate, fetch, ipinfo, web search). |
 | [livehost-api](https://github.com/lugondev/livehost-api) | TikTok Live AI co-host, an out-of-process gateway plugin. |
 | [voiceprint-api](https://github.com/lugondev/voiceprint-api) | Speaker recognition (3D-Speaker), forked from [xinnan-tech/voiceprint-api](https://github.com/xinnan-tech/voiceprint-api). |
-| lugo-landing | Marketing landing page (bilingual VI/EN). **Private** — a recursive clone will skip it. |
+| [lugo-landing](https://github.com/lugondev/lugo-landing) | Marketing landing page for the platform, bilingual (Tiếng Việt / English). |
